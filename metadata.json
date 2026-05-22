@@ -1,0 +1,6 @@
+{
+  "name": "CloudPay Admin Panel",
+  "description": "Painel Administrativo para arquitetura escalável de meios de pagamento em nuvem (MVP Insper).",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

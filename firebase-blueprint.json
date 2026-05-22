@@ -1,0 +1,47 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "System user involved in transactions.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Full name" },
+        "email": { "type": "string", "format": "email", "description": "User email" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "email"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "A payment transaction.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "ID of the user who made the payment" },
+        "amount": { "type": "number", "description": "Transaction amount" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "processing", "completed", "failed"],
+          "description": "Current status of the transaction"
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "processId": { "type": "string", "description": "Trace ID for troubleshooting (simulates X-Ray)" }
+      },
+      "required": ["userId", "amount", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "App users"
+    },
+    "/payments/{paymentId}": {
+      "schema": "Payment",
+      "description": "Transactions history"
+    },
+    "/queue/{messageId}": {
+      "schema": "Payment",
+      "description": "Simulates SQS queue for asynchronous processing"
+    }
+  }
+}
