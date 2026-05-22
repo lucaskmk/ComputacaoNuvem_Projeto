@@ -1,0 +1,38 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@1,400;1,700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", ui-serif, Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-bg-primary: #0a0a0c;
+  --color-text-primary: #e0e0e0;
+  --color-text-secondary: #888888;
+  --color-accent: #c19a6b;
+  --color-border-subtle: #ffffff10;
+}
+
+@layer base {
+  body {
+    @apply font-sans bg-bg-primary text-text-primary antialiased;
+  }
+}
+
+.fintech-card {
+  @apply bg-[#111113]/50 border border-border-subtle rounded-sm overflow-hidden backdrop-blur-md;
+}
+
+.status-pending { @apply bg-transparent text-amber-500/80 border-amber-500/20; }
+.status-processing { @apply bg-transparent text-blue-400/80 border-blue-400/20 animate-pulse; }
+.status-completed { @apply bg-transparent text-accent border-accent/20; }
+.status-failed { @apply bg-transparent text-rose-500/80 border-rose-500/20; }
+
+.sidebar-item-active {
+  @apply border-l-2 border-accent bg-accent/5 text-accent;
+}
+
+.sidebar-item {
+  @apply text-text-secondary hover:text-white hover:bg-white/5 transition-all duration-300;
+}
+
