@@ -1,44 +1,37 @@
 import { useState, useEffect, useMemo } from 'react';
 import type { FormEvent } from 'react';
-import { onAuthStateChanged, User } from 'firebase/auth';
-import { collection, query, orderBy, onSnapshot, limit } from 'firebase/firestore';
 import {
   LayoutDashboard, CreditCard, Users, Activity,
   ArrowRight, Database, Clock, UserPlus, Layers, GitBranch
 } from 'lucide-react';
 import { motion } from 'motion/react';
-import {
-  BarChart, Bar, XAxis, Tooltip, ResponsiveContainer, Cell
-} from 'recharts';
+import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { format } from 'date-fns';
-
-import { auth, loginWithGoogle, logout, db } from './lib/firebase';
 import {
-  createPaymentRequest, startSimulatedWorker, createUser,
-  Payment, AppUser, QueueItem
-} from './services/paymentService';
+  listPayments, listUsers, createPayment, createUser,
+  type Payment, type AppUser,
+} from './lib/api';
 
 type Tab = 'dashboard' | 'users' | 'transactions' | 'architecture';
 type StatusFilter = 'all' | 'pending' | 'processing' | 'completed' | 'failed';
-type WorkerStatus = 'idle' | 'processing';
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [userName, setUserName] = useState<string | null>(() => localStorage.getItem('cloudpay_user'));
+  const [nameInput, setNameInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [appUsers, setAppUsers] = useState<AppUser[]>([]);
-  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
-  const [workerStatus, setWorkerStatus] = useState<WorkerStatus>('idle');
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [amount, setAmount] = useState('');
   const [selectedPaymentUserId, setSelectedPaymentUserId] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
   const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [isCreatingUser, setIsCreatingUser] = useState(false);
   const [userSuccess, setUserSuccess] = useState(false);
+
+  const pendingItems = useMemo(() => payments.filter(p => p.status === 'pending'), [payments]);
 
   const metrics = useMemo(() => {
     const finished = payments.filter(p => p.status === 'completed' || p.status === 'failed');
@@ -56,76 +49,61 @@ export default function App() {
 
   const statusColor = (status: string) => {
     switch (status) {
-      case 'completed': return 'text-[#c19a6b]';
+      case 'completed':  return 'text-[#c19a6b]';
       case 'processing': return 'text-blue-400 animate-pulse';
-      case 'failed': return 'text-rose-400';
-      default: return 'text-amber-500';
+      case 'failed':     return 'text-rose-400';
+      default:           return 'text-amber-500';
     }
   };
 
-  const handleLogin = async () => {
-    setAuthError(null);
-    try {
-      await loginWithGoogle();
-    } catch (err: unknown) {
-      const e = err as { code?: string; message?: string };
-      if (e.code === 'auth/popup-blocked' || e.message?.includes('popup-blocked')) {
-        setAuthError('Pop-up bloqueado pelo navegador. Habilite pop-ups ou abra em nova aba.');
-      } else if (e.code === 'auth/cancelled-popup-request' || e.message?.includes('closed-by-user')) {
-        setAuthError('Autenticação cancelada. Tente novamente.');
-      } else {
-        setAuthError(e.message || 'Erro inesperado. Tente abrir em modo externo.');
+  // Polling — substitui onSnapshot do Firebase
+  useEffect(() => {
+    if (!userName) { setLoading(false); return; }
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const [pays, users] = await Promise.all([listPayments(), listUsers()]);
+        if (!cancelled) {
+          setPayments(pays.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+          setAppUsers(users.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+          setLoading(false);
+        }
+      } catch {
+        if (!cancelled) setLoading(false);
       }
-    }
+    };
+
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [userName]);
+
+  const handleLogin = (e: FormEvent) => {
+    e.preventDefault();
+    const name = nameInput.trim();
+    if (!name) return;
+    localStorage.setItem('cloudpay_user', name);
+    setUserName(name);
+    setLoading(true);
   };
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+  const handleLogout = () => {
+    localStorage.removeItem('cloudpay_user');
+    setUserName(null);
+    setPayments([]);
+    setAppUsers([]);
+  };
 
-  useEffect(() => {
-    if (!user) return;
-
-    const stopWorker = startSimulatedWorker((status) => setWorkerStatus(status));
-
-    const qPayments = query(collection(db, 'payments'), orderBy('createdAt', 'desc'), limit(50));
-    const unsubPayments = onSnapshot(qPayments, (snap) => {
-      setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() } as Payment)));
-    });
-
-    const qQueue = query(collection(db, 'queue'), orderBy('createdAt', 'asc'));
-    const unsubQueue = onSnapshot(qQueue, (snap) => {
-      setQueueItems(snap.docs.map(d => ({ id: d.id, ...d.data() } as QueueItem)));
-    });
-
-    const qUsers = query(collection(db, 'users'), orderBy('createdAt', 'desc'));
-    const unsubUsers = onSnapshot(qUsers, (snap) => {
-      setAppUsers(snap.docs.map(d => ({ id: d.id, ...d.data() } as AppUser)));
-    });
-
-    return () => {
-      stopWorker();
-      unsubPayments();
-      unsubQueue();
-      unsubUsers();
-    };
-  }, [user]);
-
-  const handleCreatePayment = async (e: React.FormEvent) => {
+  const handleCreatePayment = async (e: FormEvent) => {
     e.preventDefault();
-    if (!user || !amount) return;
+    if (!userName || !amount) return;
     setIsProcessing(true);
     try {
-      const selectedUser = selectedPaymentUserId
-        ? appUsers.find(u => u.id === selectedPaymentUserId)
-        : null;
-      const uid = selectedUser?.id || user.uid;
-      const uname = selectedUser?.name || user.displayName || 'Anonymous';
-      await createPaymentRequest(uid, uname, parseFloat(amount));
+      const selectedUser = selectedPaymentUserId ? appUsers.find(u => u.userId === selectedPaymentUserId) : null;
+      const uid = selectedUser?.userId || 'admin';
+      const uname = selectedUser?.name || userName;
+      await createPayment(uid, uname, parseFloat(amount));
       setAmount('');
     } catch (err) {
       console.error(err);
@@ -134,7 +112,7 @@ export default function App() {
     }
   };
 
-  const handleCreateUser = async (e: React.FormEvent) => {
+  const handleCreateUser = async (e: FormEvent) => {
     e.preventDefault();
     if (!newUserName || !newUserEmail) return;
     setIsCreatingUser(true);
@@ -151,18 +129,18 @@ export default function App() {
     }
   };
 
-  if (loading) {
+  if (loading && userName) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0a0a0c]">
         <div className="flex flex-col items-center gap-4">
           <Activity className="w-8 h-8 text-[#c19a6b] animate-spin" />
-          <p className="text-[#888] font-mono text-[10px] tracking-widest uppercase">System Initialization</p>
+          <p className="text-[#888] font-mono text-[10px] tracking-widest uppercase">Connecting to AWS</p>
         </div>
       </div>
     );
   }
 
-  if (!user) {
+  if (!userName) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0a0a0c] overflow-hidden relative">
         <div className="absolute top-0 -left-1/4 w-1/2 h-1/2 bg-[#c19a6b]/5 rounded-full blur-[120px]" />
@@ -181,31 +159,34 @@ export default function App() {
               Escalável.<br /><span className="text-[#c19a6b] not-italic">Assíncrono.</span>
             </h1>
             <p className="max-w-sm text-[#888] leading-relaxed text-sm mb-12">
-              MVP de meios de pagamento com arquitetura distribuída em nuvem — processamento assíncrono via SQS + Lambda, persistência NoSQL e painel operacional em tempo real.
+              MVP de meios de pagamento com arquitetura distribuída em nuvem — processamento assíncrono via SQS + Lambda, persistência NoSQL no DynamoDB e painel operacional em tempo real.
             </p>
-            <div className="flex flex-col gap-4">
-              <button
-                onClick={handleLogin}
-                className="w-fit py-4 px-12 border border-[#ffffff15] hover:border-[#c19a6b] text-white font-medium text-xs uppercase tracking-widest transition-all hover:bg-[#c19a6b] hover:text-black active:scale-95"
-              >
-                Autenticar
-              </button>
-              <button
-                onClick={() => window.open(window.location.href, '_blank')}
-                className="w-fit py-2 text-[#888] hover:text-[#c19a6b] text-[10px] uppercase tracking-widest transition-all font-mono flex items-center gap-2"
-              >
-                <span>↗</span> Abrir em nova aba
-              </button>
-            </div>
-            {authError && (
-              <div className="mt-8 p-5 bg-rose-950/20 border border-rose-950 text-rose-200 text-xs font-mono leading-relaxed max-w-md">
-                <span className="text-rose-400 font-bold uppercase tracking-widest block mb-2">[Security Notice]</span>
-                {authError}
+            <form onSubmit={handleLogin} className="flex flex-col gap-4">
+              <div className="group">
+                <label className="block text-[9px] font-bold text-[#555] uppercase tracking-[0.3em] mb-3 group-focus-within:text-[#c19a6b] transition-colors">
+                  Seu nome
+                </label>
+                <input
+                  type="text"
+                  value={nameInput}
+                  onChange={e => setNameInput(e.target.value)}
+                  placeholder="Ex: Lucas Kenji"
+                  className="w-full bg-transparent border-b border-[#ffffff15] focus:border-[#c19a6b] text-white text-lg pb-3 focus:outline-none transition-all placeholder:text-[#333]"
+                  autoFocus
+                />
               </div>
-            )}
+              <button
+                type="submit"
+                disabled={!nameInput.trim()}
+                className="w-fit py-4 px-12 border border-[#ffffff15] hover:border-[#c19a6b] text-white font-medium text-xs uppercase tracking-widest transition-all hover:bg-[#c19a6b] hover:text-black active:scale-95 disabled:opacity-20 flex items-center gap-4"
+              >
+                Entrar
+                <ArrowRight size={14} />
+              </button>
+            </form>
             <div className="mt-16 flex gap-8 items-center pt-8 border-t border-[#ffffff10]">
-              <span className="text-[9px] uppercase tracking-widest text-[#555]">Stack: Firebase + React + TypeScript</span>
-              <span className="text-[9px] uppercase tracking-widest text-[#555]">Região: US-EAST-1</span>
+              <span className="text-[9px] uppercase tracking-widest text-[#555]">Stack: AWS SQS + Lambda + DynamoDB</span>
+              <span className="text-[9px] uppercase tracking-widest text-[#555]">Região: US-EAST-2</span>
             </div>
           </div>
         </motion.div>
@@ -214,10 +195,10 @@ export default function App() {
   }
 
   const navItems = [
-    { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-    { id: 'users',     icon: Users,           label: 'Usuários' },
-    { id: 'transactions', icon: CreditCard,   label: 'Transações' },
-    { id: 'architecture', icon: Layers,       label: 'Arquitetura' },
+    { id: 'dashboard',    icon: LayoutDashboard, label: 'Dashboard' },
+    { id: 'users',        icon: Users,           label: 'Usuários' },
+    { id: 'transactions', icon: CreditCard,       label: 'Transações' },
+    { id: 'architecture', icon: Layers,           label: 'Arquitetura' },
   ];
 
   return (
@@ -246,32 +227,27 @@ export default function App() {
           ))}
         </nav>
 
-        {/* Worker Status */}
+        {/* Lambda Status */}
         <div className="mb-8 p-4 border border-[#ffffff10] bg-[#0d0d0f]">
           <div className="text-[9px] uppercase tracking-widest text-[#555] mb-2">Lambda Worker</div>
           <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${workerStatus === 'processing' ? 'bg-blue-400 animate-pulse' : 'bg-[#c19a6b]'}`} />
-            <span className={`text-[10px] font-mono uppercase tracking-widest ${workerStatus === 'processing' ? 'text-blue-400' : 'text-[#c19a6b]'}`}>
-              {workerStatus === 'processing' ? 'Processando' : 'Aguardando'}
-            </span>
+            <div className="w-2 h-2 rounded-full bg-[#c19a6b]" />
+            <span className="text-[10px] font-mono uppercase tracking-widest text-[#c19a6b]">AWS — Ativo</span>
           </div>
         </div>
 
         <div className="border-t border-[#ffffff10] pt-8">
           <div className="flex items-center gap-4 mb-8">
-            <img
-              src={user.photoURL || ''}
-              alt={user.displayName || ''}
-              className="w-8 h-8 rounded-full border border-[#ffffff15]"
-              referrerPolicy="no-referrer"
-            />
+            <div className="w-8 h-8 border border-[#ffffff15] flex items-center justify-center text-[10px] text-[#c19a6b] font-bold bg-[#0d0d0f]">
+              {userName.charAt(0).toUpperCase()}
+            </div>
             <div>
-              <p className="text-white text-[10px] font-bold uppercase tracking-widest leading-none">{user.displayName}</p>
+              <p className="text-white text-[10px] font-bold uppercase tracking-widest leading-none">{userName}</p>
               <p className="text-[#555] text-[9px] uppercase tracking-widest mt-1">Admin</p>
             </div>
           </div>
           <button
-            onClick={logout}
+            onClick={handleLogout}
             className="text-[#888] hover:text-white transition-colors text-[9px] uppercase tracking-[0.3em]"
           >
             Sair
@@ -301,8 +277,8 @@ export default function App() {
           <div className="text-right">
             <div className="text-[10px] uppercase tracking-[0.3em] text-[#888] mb-1">Fila SQS</div>
             <div className="font-mono text-[#c19a6b] text-sm tracking-tighter">
-              {queueItems.length > 0
-                ? `${queueItems.length} msg pendente${queueItems.length > 1 ? 's' : ''}`
+              {pendingItems.length > 0
+                ? `${pendingItems.length} msg pendente${pendingItems.length > 1 ? 's' : ''}`
                 : 'Vazia — OPTIMAL'}
             </div>
           </div>
@@ -311,7 +287,6 @@ export default function App() {
         {/* ── DASHBOARD ── */}
         {activeTab === 'dashboard' && (
           <div className="space-y-20">
-            {/* Real Metrics */}
             <div className="grid grid-cols-4 gap-12 border-b border-[#ffffff10] pb-16">
               {[
                 { label: 'Transações Concluídas', value: metrics.completed },
@@ -342,7 +317,7 @@ export default function App() {
               <div className="col-span-5">
                 <h3 className="text-[10px] uppercase tracking-[0.4em] text-white mb-6">01 / Nova Transação</h3>
                 <p className="text-xs text-[#888] leading-relaxed mb-8 max-w-xs">
-                  Disparo assíncrono via fila SQS — a requisição é enfileirada e o worker Lambda processa independentemente.
+                  Disparo assíncrono via SQS — a requisição é enviada ao API Gateway, o Lambda cria a mensagem na fila e o Worker Lambda processa independentemente.
                 </p>
                 <form onSubmit={handleCreatePayment} className="space-y-8">
                   <div className="group">
@@ -359,7 +334,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* User Selector */}
                   {appUsers.length > 0 && (
                     <div>
                       <label className="block text-[9px] font-bold text-[#555] uppercase tracking-[0.3em] mb-3">
@@ -375,14 +349,14 @@ export default function App() {
                               : 'border-[#ffffff10] text-[#555] hover:border-[#ffffff20]'
                           }`}
                         >
-                          {user.displayName} (Admin)
+                          {userName} (Admin)
                         </button>
                         {appUsers.map(u => (
                           <button
-                            type="button" key={u.id}
-                            onClick={() => setSelectedPaymentUserId(u.id || '')}
+                            type="button" key={u.userId}
+                            onClick={() => setSelectedPaymentUserId(u.userId)}
                             className={`w-full text-left px-4 py-2 text-[9px] uppercase tracking-widest transition-all border ${
-                              selectedPaymentUserId === u.id
+                              selectedPaymentUserId === u.userId
                                 ? 'border-[#c19a6b] text-white bg-[#c19a6b]/10'
                                 : 'border-[#ffffff10] text-[#555] hover:border-[#ffffff20]'
                             }`}
@@ -398,7 +372,7 @@ export default function App() {
                     type="submit" disabled={isProcessing || !amount}
                     className="w-full h-16 border border-[#c19a6b] text-white hover:bg-[#c19a6b] hover:text-black text-[10px] font-bold uppercase tracking-[0.5em] transition-all duration-300 active:scale-95 disabled:opacity-20 flex items-center justify-center gap-4 group"
                   >
-                    {isProcessing ? 'Enfileirando...' : 'Criar Pagamento'}
+                    {isProcessing ? 'Enviando ao SQS...' : 'Criar Pagamento'}
                     <ArrowRight size={14} className="transition-transform group-hover:translate-x-2" />
                   </button>
                 </form>
@@ -434,28 +408,28 @@ export default function App() {
                     <span className="w-2 h-2 bg-rose-500 inline-block" /> Falhou
                   </span>
                   <span className="flex items-center gap-2 text-[9px] text-[#555] uppercase tracking-widest">
-                    <span className="w-2 h-2 bg-[#333] inline-block" /> Processando
+                    <span className="w-2 h-2 bg-[#333] inline-block" /> Pendente / Processando
                   </span>
                 </div>
               </div>
             </div>
 
-            {/* Queue Items (SQS visualization) */}
-            {queueItems.length > 0 && (
+            {/* Pending SQS items */}
+            {pendingItems.length > 0 && (
               <div className="pt-20 border-t border-[#ffffff10]">
                 <div className="flex justify-between items-baseline mb-12">
                   <h3 className="text-[10px] uppercase tracking-[0.4em] text-white">03 / Mensagens na Fila SQS</h3>
                   <div className="flex items-center gap-2">
                     <div className="w-1 h-1 bg-blue-400 rounded-full animate-ping" />
                     <span className="text-[10px] uppercase tracking-widest text-blue-400">
-                      {queueItems.length} aguardando processamento
+                      {pendingItems.length} aguardando processamento
                     </span>
                   </div>
                 </div>
                 <div className="divide-y divide-[#ffffff10]">
-                  {queueItems.map((item) => (
+                  {pendingItems.map((item) => (
                     <motion.div
-                      key={item.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                      key={item.processId} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
                       className="py-6 grid grid-cols-12 items-center"
                     >
                       <div className="col-span-4 text-[10px] font-mono text-blue-400 uppercase">{item.processId}</div>
@@ -470,21 +444,21 @@ export default function App() {
               </div>
             )}
 
-            {/* System Logs */}
+            {/* Logs */}
             <div className="pt-20 border-t border-[#ffffff10]">
               <div className="flex justify-between items-baseline mb-12">
                 <h3 className="text-[10px] uppercase tracking-[0.4em] text-white">
-                  {queueItems.length > 0 ? '04' : '03'} / Logs do Sistema
+                  {pendingItems.length > 0 ? '04' : '03'} / Logs do Sistema
                 </h3>
                 <div className="flex items-center gap-2">
                   <div className="w-1 h-1 bg-[#c19a6b] rounded-full animate-ping" />
-                  <span className="text-[10px] uppercase tracking-widest text-[#555]">Real-time Telemetry Active</span>
+                  <span className="text-[10px] uppercase tracking-widest text-[#555]">Polling 3s · DynamoDB</span>
                 </div>
               </div>
               <div className="divide-y divide-[#ffffff10]">
                 {payments.slice(0, 10).map((payment) => (
                   <motion.div
-                    key={payment.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                    key={payment.processId} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
                     className="py-8 grid grid-cols-12 items-center hover:bg-white/[0.02] transition-colors px-4 -mx-4 group"
                   >
                     <div className="col-span-4">
@@ -502,7 +476,7 @@ export default function App() {
                     </div>
                     <div className="col-span-3 text-right">
                       <span className="text-[10px] font-mono text-[#444] uppercase">
-                        {format(payment.createdAt?.toDate() || new Date(), 'HH:mm:ss.SSS')}
+                        {format(new Date(payment.createdAt), 'HH:mm:ss.SSS')}
                       </span>
                     </div>
                   </motion.div>
@@ -516,11 +490,10 @@ export default function App() {
         {activeTab === 'users' && (
           <div className="space-y-20">
             <div className="grid grid-cols-12 gap-16">
-              {/* Registration Form */}
               <div className="col-span-5">
                 <h3 className="text-[10px] uppercase tracking-[0.4em] text-white mb-6">01 / Cadastrar Usuário</h3>
                 <p className="text-xs text-[#888] leading-relaxed mb-10 max-w-xs">
-                  Registra um novo usuário na plataforma. Os dados são persistidos no Firestore (equivalente ao DynamoDB) e ficam disponíveis para associar a pagamentos.
+                  Registra um novo usuário via API Gateway → Lambda → DynamoDB. Os dados ficam disponíveis para associar a pagamentos.
                 </p>
                 <form onSubmit={handleCreateUser} className="space-y-8">
                   <div className="group">
@@ -561,7 +534,6 @@ export default function App() {
                 </form>
               </div>
 
-              {/* Users List */}
               <div className="col-span-7 border-l border-[#ffffff10] pl-16">
                 <div className="flex justify-between items-baseline mb-10">
                   <h3 className="text-[10px] uppercase tracking-[0.4em] text-white">02 / Usuários Registrados</h3>
@@ -569,14 +541,14 @@ export default function App() {
                 </div>
                 <div className="divide-y divide-[#ffffff10]">
                   {appUsers.length === 0 && (
-                    <p className="text-[#555] text-xs py-8">Nenhum usuário cadastrado ainda. Use o formulário ao lado.</p>
+                    <p className="text-[#555] text-xs py-8">Nenhum usuário cadastrado ainda.</p>
                   )}
                   {appUsers.map((u) => {
-                    const userPayments = payments.filter(p => p.userId === u.id);
+                    const userPayments = payments.filter(p => p.userId === u.userId);
                     const userCompleted = userPayments.filter(p => p.status === 'completed').length;
                     return (
                       <motion.div
-                        key={u.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                        key={u.userId} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
                         className="py-8 grid grid-cols-12 items-center hover:bg-white/[0.02] transition-colors group"
                       >
                         <div className="col-span-1">
@@ -589,7 +561,7 @@ export default function App() {
                           <p className="text-[#555] text-[9px] mt-1 font-mono">{u.email}</p>
                         </div>
                         <div className="col-span-3 text-[#888] text-[9px] uppercase tracking-widest">
-                          {u.createdAt ? format(u.createdAt.toDate(), 'dd/MM/yyyy') : '—'}
+                          {format(new Date(u.createdAt), 'dd/MM/yyyy')}
                         </div>
                         <div className="col-span-3 text-right">
                           <span className="text-[10px] font-mono text-[#c19a6b]">
@@ -635,7 +607,7 @@ export default function App() {
               )}
               {filteredPayments.map((p) => (
                 <motion.div
-                  key={p.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                  key={p.processId} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
                   className="py-8 grid grid-cols-12 items-center group cursor-default hover:bg-white/[0.02] transition-colors"
                 >
                   <div className="col-span-1 text-[10px] font-mono text-[#333] group-hover:text-[#c19a6b] transition-colors">
@@ -659,12 +631,10 @@ export default function App() {
                     <span className={`text-[9px] uppercase tracking-[0.2em] italic ${statusColor(p.status)}`}>
                       {p.status}
                     </span>
-                    {p.error && (
-                      <p className="text-[9px] text-rose-400/60 mt-1 font-mono">{p.error}</p>
-                    )}
+                    {p.error && <p className="text-[9px] text-rose-400/60 mt-1 font-mono">{p.error}</p>}
                   </div>
                   <div className="col-span-2 text-right text-[10px] font-mono text-[#333]">
-                    {format(p.createdAt?.toDate() || new Date(), 'dd/MM HH:mm:ss')}
+                    {format(new Date(p.createdAt), 'dd/MM HH:mm:ss')}
                   </div>
                 </motion.div>
               ))}
@@ -675,29 +645,29 @@ export default function App() {
         {/* ── ARCHITECTURE ── */}
         {activeTab === 'architecture' && (
           <div className="space-y-24 animate-in fade-in duration-500">
-            {/* Overview */}
             <div className="max-w-3xl">
               <h3 className="text-[10px] uppercase tracking-[0.4em] text-[#c19a6b] mb-6">Visão Geral</h3>
               <p className="text-[#888] leading-loose text-sm mb-4">
-                Plataforma MVP de meios de pagamento com arquitetura orientada a eventos, processamento assíncrono e armazenamento distribuído.
-                A solução simula padrões AWS usando Firebase como infraestrutura gerenciada, mantendo total fidelidade conceitual com a arquitetura de referência.
+                Plataforma MVP de meios de pagamento com arquitetura orientada a eventos, 100% serverless na AWS.
+                O frontend React consome uma HTTP API (API Gateway) que delega para funções Lambda.
+                O processamento assíncrono ocorre via SQS — o Lambda Worker é acionado automaticamente pela fila.
               </p>
               <p className="text-[#666] leading-loose text-sm">
-                O foco está em desacoplamento de componentes, resiliência via fila e observabilidade em tempo real — princípios centrais de sistemas de pagamento em produção.
+                Dados são persistidos no DynamoDB. O frontend faz polling a cada 3 segundos para refletir o estado
+                em tempo real sem necessidade de WebSockets.
               </p>
             </div>
 
-            {/* Data Flow */}
             <div className="border-t border-[#ffffff10] pt-16">
               <h3 className="text-[10px] uppercase tracking-[0.4em] text-white mb-12">01 / Fluxo de Dados</h3>
               <div className="flex items-start gap-0 overflow-x-auto pb-4">
                 {[
-                  { label: 'Browser',        sublabel: '≈ Client App',     color: '#c19a6b', desc: 'React + TypeScript' },
-                  { label: 'Firebase Auth',  sublabel: '≈ AWS Cognito',    color: '#888',    desc: 'Google OAuth 2.0' },
-                  { label: 'Collection Queue', sublabel: '≈ AWS SQS',      color: '#60a5fa', desc: 'Fila assíncrona' },
-                  { label: 'Lambda Worker',  sublabel: 'onSnapshot trigger', color: '#a78bfa', desc: 'Processamento' },
-                  { label: 'Collection Payments', sublabel: '≈ DynamoDB',  color: '#c19a6b', desc: 'Persistência NoSQL' },
-                  { label: 'Dashboard',      sublabel: '≈ CloudWatch',     color: '#34d399', desc: 'Observabilidade' },
+                  { label: 'Browser',             sublabel: 'React + fetch()',     color: '#c19a6b', desc: 'Polling 3s' },
+                  { label: 'API Gateway',          sublabel: 'HTTP API',           color: '#888',    desc: 'CORS + Routes' },
+                  { label: 'Lambda createPayment', sublabel: 'POST /payments',     color: '#60a5fa', desc: 'Publica no SQS' },
+                  { label: 'SQS',                  sublabel: 'cloudpay-payments',  color: '#a78bfa', desc: 'Fila assíncrona' },
+                  { label: 'Lambda Worker',        sublabel: 'SQS Trigger',        color: '#a78bfa', desc: 'Processa pagamento' },
+                  { label: 'DynamoDB',             sublabel: 'cloudpay-payments',  color: '#c19a6b', desc: 'Persistência NoSQL' },
                 ].map((node, i, arr) => (
                   <div key={i} className="flex items-center flex-shrink-0">
                     <div className="w-36 p-4 border border-[#ffffff10] bg-[#0d0d0f] text-center hover:border-[#c19a6b]/50 transition-colors">
@@ -707,8 +677,7 @@ export default function App() {
                     </div>
                     {i < arr.length - 1 && (
                       <div className="flex items-center mx-1 text-[#333]">
-                        <div className="w-4 h-px bg-[#ffffff20]" />
-                        →
+                        <div className="w-4 h-px bg-[#ffffff20]" />→
                       </div>
                     )}
                   </div>
@@ -716,40 +685,39 @@ export default function App() {
               </div>
             </div>
 
-            {/* Services & Rationale */}
             <div className="border-t border-[#ffffff10] pt-16">
-              <h3 className="text-[10px] uppercase tracking-[0.4em] text-white mb-12">02 / Serviços e Justificativas Técnicas</h3>
+              <h3 className="text-[10px] uppercase tracking-[0.4em] text-white mb-12">02 / Serviços AWS e Justificativas</h3>
               <div className="grid grid-cols-2 gap-px bg-[#ffffff10] border border-[#ffffff10]">
                 {[
                   {
-                    aws: 'AWS SQS', impl: 'Firestore /queue',
-                    why: 'Desacopla a recepção do pagamento do seu processamento efetivo. A API retorna imediatamente após enfileirar, sem bloquear na resposta do worker. Permite absorver picos de carga sem degradação e garante que nenhuma mensagem seja perdida em caso de falha do consumidor.',
-                    trade: 'Firestore não garante FIFO estrito sem índice composto — para o MVP é aceitável.'
+                    aws: 'AWS SQS', impl: 'cloudpay-payments queue',
+                    why: 'Desacopla a recepção do pagamento do seu processamento efetivo. O API Gateway retorna 202 Accepted imediatamente após enfileirar, sem bloquear na resposta do Worker. Absorve picos de carga sem degradação e garante entrega mesmo em caso de falha do consumidor.',
+                    trade: 'Sem FIFO estrito na fila Standard — para MVP com volume baixo, aceitável.',
                   },
                   {
-                    aws: 'AWS Lambda', impl: 'startSimulatedWorker()',
-                    why: 'Worker stateless que reage a eventos da fila via onSnapshot. Simula o modelo SQS→Lambda: processa independentemente da camada de API, atualiza status com latência simulada de 2s e implementa taxa de falha de 20% para demonstrar resiliência.',
-                    trade: 'Sem escalabilidade horizontal real — instância única no browser. Produção usaria Lambda concorrente.'
+                    aws: 'AWS Lambda (Worker)', impl: 'cloudpay-worker — SQS Trigger',
+                    why: 'Worker stateless acionado automaticamente pelo SQS. Escala horizontalmente por padrão: se houver 1000 mensagens na fila, AWS executa 1000 instâncias do Lambda concorrentemente. Implementa taxa de falha de 20% para demonstrar resiliência.',
+                    trade: 'Timeout máximo de 15 minutos — transações longas precisariam de Step Functions.',
                   },
                   {
-                    aws: 'DynamoDB', impl: 'Firestore /payments',
-                    why: 'NoSQL com schema flexível ideal para dados de transação que evoluem com o negócio. Suporta alta taxa de escrita, consultas por processId via índice composto e atualizações atômicas de status. Real-time via onSnapshot elimina polling.',
-                    trade: 'Sem transações ACID nativas — para MVP sem reversão financeira real, aceitável.'
+                    aws: 'DynamoDB', impl: 'cloudpay-payments + cloudpay-users',
+                    why: 'NoSQL com schema flexível e alta taxa de escrita. PK por processId permite leitura O(1). Suporta milhões de transações por segundo com latência de milissegundos. Sem servidor para gerenciar.',
+                    trade: 'Sem transações ACID nativas entre tabelas — aceitável para MVP sem estorno financeiro.',
                   },
                   {
-                    aws: 'API Gateway', impl: 'Firebase SDK direto',
-                    why: 'O SDK do Firebase substitui um gateway HTTP convencional, provendo autenticação, roteamento e serialização automaticamente via Firestore Security Rules. Reduz complexidade operacional do MVP.',
-                    trade: 'Em produção, API Gateway adicionaria rate limiting, caching e contract versioning.'
+                    aws: 'API Gateway (HTTP API)', impl: 'POST /payments, GET /payments, POST /users, GET /users',
+                    why: 'Expõe as funções Lambda como endpoints HTTP REST com CORS configurado. Gerencia throttling, autenticação (Cognito-ready) e roteamento. O frontend nunca acessa AWS diretamente.',
+                    trade: 'Sem cache de resposta configurado — GET /payments faz Scan no DynamoDB a cada chamada.',
                   },
                   {
-                    aws: 'AWS Cognito', impl: 'Firebase Authentication',
-                    why: 'Gerencia identidade com Google OAuth 2.0. Tokens JWT validados automaticamente pelo Firestore Security Rules — sem implementar lógica de autenticação manual. Separa autenticação de autorização.',
-                    trade: 'Apenas Google como IdP — produto real precisaria múltiplos providers e MFA.'
+                    aws: 'Lambda (createPayment)', impl: 'POST /payments → SQS + DynamoDB',
+                    why: 'Valida o payload, gera o processId único, escreve no DynamoDB com status pending e publica no SQS. Separa a camada de recepção da camada de processamento — padrão produtor/consumidor clássico.',
+                    trade: 'Em produção adicionaria idempotency key para evitar duplicatas em retry do cliente.',
                   },
                   {
-                    aws: 'CloudWatch', impl: 'Dashboard em tempo real',
-                    why: 'Métricas calculadas dinamicamente (taxa de sucesso, volume total, falhas, status do worker) via onSnapshot. Observabilidade end-to-end sem infraestrutura adicional. Logs de transação visíveis em tempo real.',
-                    trade: 'Sem alertas automáticos ou retenção de histórico além de 50 transações carregadas.'
+                    aws: 'Polling (Frontend)', impl: 'setInterval 3s → GET /payments',
+                    why: 'Substitui os onSnapshot do Firestore. Simples, sem infra adicional e suficiente para a demo. O DynamoDB retorna sempre o estado mais recente. Latência máxima de visibilidade: 3 segundos.',
+                    trade: 'Produção usaria API Gateway WebSockets ou AppSync para real-time sem polling.',
                   },
                 ].map((item, i) => (
                   <div key={i} className="bg-[#0a0a0c] p-8 hover:bg-[#c19a6b]/5 transition-colors">
@@ -763,36 +731,15 @@ export default function App() {
               </div>
             </div>
 
-            {/* System Layers */}
             <div className="border-t border-[#ffffff10] pt-16">
               <h3 className="text-[10px] uppercase tracking-[0.4em] text-white mb-12">03 / Camadas do Sistema</h3>
               <div className="space-y-0">
                 {[
-                  {
-                    name: 'Camada de Entrada',
-                    desc: 'Firebase SDK + React Forms — recebe requisições, valida inputs e chama a camada de serviço. Responsável por autenticação e autorização via JWT.',
-                    icon: GitBranch
-                  },
-                  {
-                    name: 'Camada de Aplicação',
-                    desc: 'paymentService.ts + App.tsx — lógica de negócio encapsulada em funções de serviço com responsabilidade única. Separa handlers de UI da lógica de domínio.',
-                    icon: Layers
-                  },
-                  {
-                    name: 'Camada Assíncrona',
-                    desc: 'Firestore /queue + startSimulatedWorker() — desacopla recepção de processamento via padrão event-driven. Worker escuta a fila e processa independentemente com taxa de falha simulada.',
-                    icon: Activity
-                  },
-                  {
-                    name: 'Camada de Persistência',
-                    desc: 'Firestore /payments + /users + /queue — collections com schema documentado em firebase-blueprint.json, regras de segurança por role em firestore.rules.',
-                    icon: Database
-                  },
-                  {
-                    name: 'Camada de Observabilidade',
-                    desc: 'Dashboard em tempo real com métricas calculadas (taxa de sucesso, volume, falhas), logs de transação, status do worker Lambda e visualização da fila SQS.',
-                    icon: Clock
-                  },
+                  { name: 'Camada de Entrada',       desc: 'API Gateway HTTP API — recebe requisições do browser, valida CORS, roteia para o Lambda correto. Rate limiting e autenticação (Cognito) são configurados aqui.', icon: GitBranch },
+                  { name: 'Camada de Aplicação',      desc: 'Lambda createPayment + Lambda createUser — lógica de negócio stateless. Cada função tem responsabilidade única: valida input, grava no DynamoDB e publica no SQS.', icon: Layers },
+                  { name: 'Camada Assíncrona',        desc: 'SQS cloudpay-payments → Lambda Worker — desacopla recepção de processamento. O Worker atualiza o status no DynamoDB após processar, com 20% de taxa de falha simulada.', icon: Activity },
+                  { name: 'Camada de Persistência',   desc: 'DynamoDB cloudpay-payments (PK: processId) + cloudpay-users (PK: userId). Scan com sort no Lambda para listagem. Sem servidor para gerenciar.', icon: Database },
+                  { name: 'Camada de Observabilidade',desc: 'Dashboard React com polling 3s. Métricas calculadas client-side (taxa de sucesso, volume, falhas). CloudWatch Logs automático em todas as Lambdas.', icon: Clock },
                 ].map((layer, i) => (
                   <div key={i} className="flex items-start gap-8 py-6 border-b border-[#ffffff10]">
                     <span className="text-[10px] font-mono text-[#c19a6b] uppercase tracking-widest shrink-0 w-8 pt-1">0{i + 1}</span>
@@ -805,14 +752,13 @@ export default function App() {
               </div>
             </div>
 
-            {/* Tech Stack */}
             <div className="border-t border-[#ffffff10] pt-16">
               <h3 className="text-[10px] uppercase tracking-[0.4em] text-white mb-12">04 / Stack Tecnológico</h3>
               <div className="grid grid-cols-3 gap-8">
                 {[
                   { cat: 'Frontend', items: ['React 19', 'TypeScript', 'Vite 6', 'Tailwind CSS 4', 'Recharts', 'Motion'] },
-                  { cat: 'Backend / Nuvem', items: ['Firebase Firestore', 'Firebase Auth', 'Google OAuth 2.0', 'Firestore Security Rules'] },
-                  { cat: 'Padrões Arquiteturais', items: ['Event-Driven Architecture', 'Async Queue Processing', 'Real-time Subscriptions', 'Serverless Functions', 'NoSQL Document Store'] },
+                  { cat: 'AWS Cloud', items: ['API Gateway HTTP API', 'Lambda Node.js 22.x', 'SQS Standard Queue', 'DynamoDB', 'IAM Roles', 'CloudWatch Logs'] },
+                  { cat: 'Padrões Arquiteturais', items: ['Event-Driven Architecture', 'Async Queue Processing', 'Serverless Functions', 'Producer/Consumer Pattern', 'NoSQL Document Store', 'Polling for real-time'] },
                 ].map((col, i) => (
                   <div key={i}>
                     <h4 className="text-[9px] uppercase tracking-widest text-[#c19a6b] mb-4">{col.cat}</h4>
@@ -833,7 +779,7 @@ export default function App() {
       </main>
 
       <footer className="fixed bottom-0 left-0 w-80 p-12 text-[9px] uppercase tracking-[0.4em] text-[#333] border-t border-[#ffffff05] pointer-events-none">
-        CloudPay MVP v2.0
+        CloudPay MVP v3.0 · AWS
       </footer>
     </div>
   );
