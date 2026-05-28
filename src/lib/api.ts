@@ -18,13 +18,30 @@ export interface AppUser {
   createdAt: string;
 }
 
+export interface CurrentUser {
+  userId: string;
+  name: string;
+  email: string;
+  role: 'user' | 'admin';
+}
+
 const ok = async (res: Response) => {
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `HTTP ${res.status}`);
+  }
   return res.json();
 };
 
-export const listPayments = (): Promise<Payment[]> =>
-  fetch(`${BASE}/payments`).then(ok);
+export const login = (email: string, password: string): Promise<CurrentUser> =>
+  fetch(`${BASE}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  }).then(ok);
+
+export const listPayments = (userId?: string): Promise<Payment[]> =>
+  fetch(`${BASE}/payments${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`).then(ok);
 
 export const createPayment = (userId: string, userName: string, amount: number): Promise<{ processId: string }> =>
   fetch(`${BASE}/payments`, {
@@ -36,9 +53,9 @@ export const createPayment = (userId: string, userName: string, amount: number):
 export const listUsers = (): Promise<AppUser[]> =>
   fetch(`${BASE}/users`).then(ok);
 
-export const createUser = (name: string, email: string): Promise<{ userId: string }> =>
+export const createUser = (name: string, email: string, password?: string): Promise<{ userId: string }> =>
   fetch(`${BASE}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, email }),
+    body: JSON.stringify({ name, email, ...(password ? { password } : {}) }),
   }).then(ok);
