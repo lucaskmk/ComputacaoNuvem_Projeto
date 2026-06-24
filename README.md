@@ -2,8 +2,6 @@
 
 > Projeto da Disciplina — Computação em Nuvem · Engenharia de Computação · Insper 2026/1
 
-**Demo ao vivo:** http://cloudpay-frontend.s3-website.us-east-2.amazonaws.com
-
 **Video demonstrativo:** https://youtu.be/oLAcKvllrsY
 
 ---
